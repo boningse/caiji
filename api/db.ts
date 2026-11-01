@@ -7,9 +7,9 @@ const pool = new Pool({
   database: process.env.DB_NAME || 'postgres',
   password: process.env.DB_PASSWORD || 'BoNing@123',
   port: parseInt(process.env.DB_PORT || '5432'),
-  max: 50, // 增加最大连接数，应对高并发的MQTT数据写入
+  max: 40, // PostgreSQL max_connections 为 100，限制应用池以给维护与其他客户端保留余量
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
+  connectionTimeoutMillis: 10000, // 增加连接超时时间，防止瞬间突发打满时报错
 });
 
 pool.on('error', (err) => {

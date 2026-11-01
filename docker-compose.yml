@@ -9,13 +9,29 @@ services:
       - TZ=Asia/Shanghai
       - NODE_ENV=production
       - PORT=3000
-      - DB_USER=${DB_USER:-omm}
-      - DB_PASSWORD=${DB_PASSWORD:-BoNing@123}
-      - DB_HOST=${DB_HOST:-127.0.0.1}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-password}
+      - DB_HOST=${DB_HOST:-db}
       - DB_PORT=${DB_PORT:-5432}
-      - DB_NAME=${DB_NAME:-postgres}
+      - DB_NAME=${DB_NAME:-kongzhi}
       - JWT_SECRET=${JWT_SECRET:-your-secret-key}
+      - ENVIRONMENT_MONITOR_ENCRYPTION_KEY=${ENVIRONMENT_MONITOR_ENCRYPTION_KEY:-}
       - MQTT_BROKER=${MQTT_BROKER:-mqtt://223.80.108.95:15007}
       - MQTT_USERNAME=${MQTT_USERNAME:-boning}
       - MQTT_PASSWORD=${MQTT_PASSWORD:-BoNing@123}
-    network_mode: "host" # Using host network to easily access local PostgreSQL if it's on the host
+    depends_on:
+      - db
+    network_mode: "host"
+
+  db:
+    image: timescale/timescaledb:2.15.1-pg16
+    container_name: pg-kongzhi
+    restart: always
+    environment:
+      - POSTGRES_USER=${DB_USER:-postgres}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-password}
+      - POSTGRES_DB=${DB_NAME:-kongzhi}
+    ports:
+      - "5432:5432"
+    volumes:
+      - /mnt/data1/pg-kongzhi-live:/var/lib/postgresql/data:Z

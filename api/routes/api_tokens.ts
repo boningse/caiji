@@ -19,7 +19,7 @@ router.get('/', async (req: Request, res: Response) => {
     if (user.role !== 'ADMIN') {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
-    const result = await query('SELECT * FROM api_tokens ORDER BY created_at DESC');
+    const result = await query("SELECT * FROM api_tokens WHERE COALESCE(token_type, 'GENERAL') <> 'METER_VENDOR' ORDER BY created_at DESC");
     res.json({ success: true, data: result.rows });
   } catch (error) {
     console.error('Error fetching API tokens:', error);
@@ -29,7 +29,7 @@ router.get('/', async (req: Request, res: Response) => {
 
 // Create a new API token
 router.post('/', async (req: Request, res: Response) => {
-  const { name, project_ids } = req.body;
+  const { name, project_ids, permissions } = req.body;
   try {
     const user = (req as any).user;
     if (user.role !== 'ADMIN') {
@@ -37,10 +37,11 @@ router.post('/', async (req: Request, res: Response) => {
     }
     const token = generateToken();
     const pIds = Array.isArray(project_ids) ? project_ids : [];
+    const perms = Array.isArray(permissions) ? permissions : ['read_data'];
     
     const result = await query(
-      'INSERT INTO api_tokens (name, token, project_ids) VALUES ($1, $2, $3) RETURNING *',
-      [name, token, pIds]
+      'INSERT INTO api_tokens (name, token, project_ids, permissions) VALUES ($1, $2, $3, $4) RETURNING *',
+      [name, token, pIds, perms]
     );
     
     res.json({ success: true, message: 'API token created', data: result.rows[0] });
@@ -53,17 +54,18 @@ router.post('/', async (req: Request, res: Response) => {
 // Update an API token
 router.put('/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { name, project_ids, status } = req.body;
+  const { name, project_ids, permissions, status } = req.body;
   try {
     const user = (req as any).user;
     if (user.role !== 'ADMIN') {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
     const pIds = Array.isArray(project_ids) ? project_ids : [];
+    const perms = Array.isArray(permissions) ? permissions : ['read_data'];
     
     const result = await query(
-      'UPDATE api_tokens SET name = $1, project_ids = $2, status = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $4 RETURNING *',
-      [name, pIds, status, parseInt(id, 10)]
+      "UPDATE api_tokens SET name = $1, project_ids = $2, permissions = $3, status = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $5 AND COALESCE(token_type, 'GENERAL') <> 'METER_VENDOR' RETURNING *",
+      [name, pIds, perms, status, parseInt(id, 10)]
     );
     
     if (result.rowCount === 0) {
@@ -85,7 +87,10 @@ router.delete('/:id', async (req: Request, res: Response) => {
     if (user.role !== 'ADMIN') {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
-    await query('DELETE FROM api_tokens WHERE id = $1', [parseInt(id, 10)]);
+    const result = await query("DELETE FROM api_tokens WHERE id = $1 AND COALESCE(token_type, 'GENERAL') <> 'METER_VENDOR' RETURNING id", [parseInt(id, 10)]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'API token not found' });
+    }
     res.json({ success: true, message: 'API token deleted' });
   } catch (error) {
     console.error('Error deleting API token:', error);

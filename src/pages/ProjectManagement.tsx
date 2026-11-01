@@ -94,6 +94,11 @@ const ProjectManagement: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const normalizedCode = formData.code.trim();
+    if (!normalizedCode) {
+      alert('项目编号不能为空');
+      return;
+    }
     
     if (editingId) {
       // Edit existing
@@ -102,7 +107,7 @@ const ProjectManagement: React.FC = () => {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            code: formData.code,
+            code: normalizedCode,
             name: formData.name,
             details: formData.details
           })
@@ -126,7 +131,7 @@ const ProjectManagement: React.FC = () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             parent_id: parentProject ? parentProject.id : null,
-            code: formData.code,
+            code: normalizedCode,
             name: formData.name,
             details: formData.details,
             level: parentProject ? parentProject.level + 1 : 1
@@ -200,7 +205,7 @@ const ProjectManagement: React.FC = () => {
           return (
             <div key={project.id} className="border border-gray-200 rounded-lg overflow-hidden bg-white shadow-sm">
               <div 
-                className={`flex items-center justify-between p-4 hover:bg-gray-50 transition-colors ${isExpanded ? 'border-b border-gray-100' : ''}`}
+                className={`flex flex-col sm:flex-row sm:items-center sm:justify-between p-4 hover:bg-gray-50 transition-colors ${isExpanded ? 'border-b border-gray-100' : ''}`}
               >
                 <div className="flex items-center space-x-3 flex-1">
                   <button 
@@ -214,7 +219,7 @@ const ProjectManagement: React.FC = () => {
                   {isExpanded ? <FolderOpen className="w-5 h-5 text-blue-500" /> : <Folder className="w-5 h-5 text-blue-500" />}
                   
                   <div className="flex-1">
-                    <div className="flex items-center space-x-3">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium text-gray-900">{project.name}</span>
                       <span className="px-2 py-0.5 text-xs bg-gray-100 text-gray-600 rounded">编号: {project.code || '无'}</span>
                       <span className="px-2 py-0.5 text-xs bg-blue-50 text-blue-600 rounded">{project.level}级项目</span>
@@ -225,14 +230,14 @@ const ProjectManagement: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="flex items-center space-x-2">
+                <div className="flex items-center space-x-2 mt-2 sm:mt-0">
                   {canAddChild && (
                     <button
                       onClick={() => handleAddClick(project)}
                       className="flex items-center space-x-1 px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 rounded transition-colors"
                     >
                       <Plus className="w-4 h-4" />
-                      <span>添加子项目</span>
+                      <span className="hidden sm:inline">添加子项目</span>
                     </button>
                   )}
                   <button
@@ -266,23 +271,23 @@ const ProjectManagement: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col lg:flex-row lg:justify-between lg:items-start gap-4">
         <div>
           <h2 className="text-xl font-semibold text-gray-800">项目管理</h2>
           <p className="text-sm text-gray-500 mt-1">管理系统中的项目及子项目层级关系，最多支持三级</p>
         </div>
-        <div className="flex space-x-4">
+        <div className="flex flex-col sm:flex-row gap-2 sm:gap-4">
           <input 
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="搜索 项目名称 / 编号"
-            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none w-64 transition-all"
+            className="flex-1 sm:flex-none sm:w-64 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all"
           />
           <select 
             value={filterLevel}
             onChange={(e) => setFilterLevel(e.target.value)}
-            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white text-gray-700"
+            className="flex-1 sm:flex-none px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white text-gray-700"
           >
             <option value="全部">全部分级</option>
             <option value="1">一级项目</option>
@@ -291,7 +296,7 @@ const ProjectManagement: React.FC = () => {
           </select>
           <button 
             onClick={() => handleAddClick(null)}
-            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center space-x-2 transition-colors shadow-sm"
+            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center justify-center space-x-2 transition-colors shadow-sm"
           >
             <Plus className="w-4 h-4" />
             <span>添加一级项目</span>
@@ -313,69 +318,49 @@ const ProjectManagement: React.FC = () => {
 
         {/* Pagination Controls */}
         {filteredProjects.length > 0 && (
-          <div className="px-6 py-4 flex items-center justify-between border-t border-gray-200 bg-gray-50">
-            <div className="flex-1 flex justify-between sm:hidden">
+          <div className="px-4 lg:px-6 py-4 flex flex-col sm:flex-row items-center justify-between gap-4 border-t border-gray-200 bg-gray-50">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 w-full sm:w-auto">
+              <p className="text-sm text-gray-700">
+                显示第 <span className="font-medium">{(currentPage - 1) * pageSize + 1}</span> 到 <span className="font-medium">{Math.min(currentPage * pageSize, filteredProjects.length)}</span> 个一级项目，共 <span className="font-medium">{filteredProjects.length}</span> 个
+              </p>
+              <div className="flex items-center space-x-2">
+                <span className="text-sm text-gray-700">每页显示</span>
+                <select
+                  value={pageSize}
+                  onChange={(e) => {
+                    setPageSize(Number(e.target.value));
+                    setCurrentPage(1);
+                  }}
+                  className="border-gray-300 rounded-md text-sm focus:ring-blue-500 focus:border-blue-500 p-1.5 outline-none border"
+                >
+                  <option value={5}>5</option>
+                  <option value={10}>10</option>
+                  <option value={20}>20</option>
+                  <option value={50}>50</option>
+                </select>
+                <span className="text-sm text-gray-700">条</span>
+              </div>
+            </div>
+            <div className="flex items-center space-x-2 sm:space-x-4 w-full sm:w-auto justify-end">
               <button
                 onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
                 disabled={currentPage === 1}
-                className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="relative inline-flex items-center px-3 py-2 rounded-l-lg border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
               >
+                <ChevronLeft className="h-4 w-4 mr-1" aria-hidden="true" />
                 上一页
               </button>
+              <span className="relative inline-flex items-center px-4 py-2 border-y border-gray-300 bg-white text-sm font-medium text-gray-700">
+                {currentPage} / {totalPages}
+              </span>
               <button
                 onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
                 disabled={currentPage === totalPages}
-                className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="relative inline-flex items-center px-3 py-2 rounded-r-lg border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 下一页
+                <ChevronRight className="h-4 w-4 ml-1" aria-hidden="true" />
               </button>
-            </div>
-            <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
-              <div>
-                <p className="text-sm text-gray-700">
-                  显示第 <span className="font-medium">{(currentPage - 1) * pageSize + 1}</span> 到 <span className="font-medium">{Math.min(currentPage * pageSize, filteredProjects.length)}</span> 个一级项目，共 <span className="font-medium">{filteredProjects.length}</span> 个
-                </p>
-              </div>
-              <div className="flex items-center space-x-4">
-                <div className="flex items-center space-x-2">
-                  <span className="text-sm text-gray-700">每页显示</span>
-                  <select
-                    value={pageSize}
-                    onChange={(e) => {
-                      setPageSize(Number(e.target.value));
-                      setCurrentPage(1);
-                    }}
-                    className="border-gray-300 rounded-md text-sm focus:ring-blue-500 focus:border-blue-500 p-1 outline-none border"
-                  >
-                    <option value={5}>5</option>
-                    <option value={10}>10</option>
-                    <option value={20}>20</option>
-                    <option value={50}>50</option>
-                  </select>
-                  <span className="text-sm text-gray-700">条</span>
-                </div>
-                <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
-                  <button
-                    onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
-                    disabled={currentPage === 1}
-                    className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <span className="sr-only">上一页</span>
-                    <ChevronLeft className="h-5 w-5" aria-hidden="true" />
-                  </button>
-                  <span className="relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700">
-                    {currentPage} / {totalPages}
-                  </span>
-                  <button
-                    onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
-                    disabled={currentPage === totalPages}
-                    className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <span className="sr-only">下一页</span>
-                    <ChevronRight className="h-5 w-5" aria-hidden="true" />
-                  </button>
-                </nav>
-              </div>
             </div>
           </div>
         )}
@@ -383,21 +368,21 @@ const ProjectManagement: React.FC = () => {
 
       {/* Add/Edit Modal */}
       {isModalOpen && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md transform transition-all">
-            <div className="flex justify-between items-center p-6 border-b border-gray-100">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
+            <div className="flex justify-between items-center p-4 lg:p-6 border-b border-gray-100">
               <h3 className="text-lg font-semibold text-gray-800">
                 {editingId ? '编辑项目' : (parentProject ? `添加子项目 (至: ${parentProject.name})` : '添加一级项目')}
               </h3>
               <button 
                 onClick={() => setIsModalOpen(false)}
-                className="text-gray-400 hover:text-gray-600 hover:bg-gray-100 p-1 rounded-full transition-colors"
+                className="text-gray-400 hover:text-gray-600 hover:bg-gray-100 p-1.5 rounded-full transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
             
-            <form onSubmit={handleSubmit} className="p-6 space-y-4">
+            <form onSubmit={handleSubmit} className="p-4 lg:p-6 space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   项目名称 <span className="text-red-500">*</span>
@@ -407,21 +392,23 @@ const ProjectManagement: React.FC = () => {
                   value={formData.name}
                   onChange={(e) => setFormData({...formData, name: e.target.value})}
                   placeholder="请输入项目名称"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
                   required
                 />
               </div>
               
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  项目编号
+                  项目编号 <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
                   value={formData.code}
                   onChange={(e) => setFormData({...formData, code: e.target.value})}
                   placeholder="例如: PRJ-2023-001"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+                  maxLength={64}
+                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+                  required
                 />
               </div>
 
@@ -434,21 +421,21 @@ const ProjectManagement: React.FC = () => {
                   onChange={(e) => setFormData({...formData, details: e.target.value})}
                   placeholder="请输入项目详情描述..."
                   rows={4}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all resize-none"
+                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all resize-none"
                 />
               </div>
 
-              <div className="pt-4 flex justify-end space-x-3">
+              <div className="pt-4 flex flex-col-reverse sm:flex-row gap-2 sm:justify-end sm:space-x-3">
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                  className="w-full sm:w-auto px-4 py-2.5 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
                 >
                   取消
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center space-x-2"
+                  className="w-full sm:w-auto px-4 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center justify-center space-x-2"
                 >
                   <Save className="w-4 h-4" />
                   <span>保存</span>

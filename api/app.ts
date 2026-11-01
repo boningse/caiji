@@ -22,8 +22,12 @@ import usersRoutes from './routes/users.js'
 import distributionsRoutes from './routes/distributions.js'
 import deviceTypesRoutes from './routes/device_types.js'
 import pointsRoutes from './routes/points.js'
+import meterRoutes from './routes/meter.js'
+import electricalRoutes from './routes/electrical.js'
+import environmentMonitorRoutes from './routes/environment-monitor.js'
 import { query } from './db.js'
 import { initMqtt } from './mqtt.js'
+import { initEnvironmentMonitor } from './environment-monitor.js'
 
 // for esm mode
 const __filename = fileURLToPath(import.meta.url)
@@ -37,6 +41,29 @@ const initDb = async () => {
   try {
     const schemaSql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf-8');
     await query(schemaSql);
+    // Project codes are required and globally unique after trimming and
+    // ignoring letter case. Existing clean data is normalized once so the
+    // database constraint and API validation use exactly the same rule.
+    try {
+      await query(`UPDATE projects SET code = BTRIM(code) WHERE code IS DISTINCT FROM BTRIM(code)`);
+      await query(`ALTER TABLE projects ALTER COLUMN code SET NOT NULL`);
+      await query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'projects_code_not_blank'
+          ) THEN
+            ALTER TABLE projects
+            ADD CONSTRAINT projects_code_not_blank CHECK (BTRIM(code) <> '');
+          END IF;
+        END $$
+      `);
+      await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_code_unique
+        ON projects (LOWER(BTRIM(code)))`);
+      console.log('Project code required/unique constraints ensured');
+    } catch (e) {
+      console.error('Failed to ensure project code constraints:', e);
+    }
     // Execute alter table for publish_topic just in case table exists
     try {
       await query('ALTER TABLE gateway_info ADD COLUMN publish_topic VARCHAR(255);');
@@ -51,6 +78,14 @@ const initDb = async () => {
       console.log('Added subscribe_topic column to gateway_info');
     } catch (e: any) {
       if (e.code !== '42701') console.error('Failed to alter table:', e);
+    }
+
+    // Record the exact time when a gateway changes from online to offline.
+    try {
+      await query('ALTER TABLE gateway_info ADD COLUMN last_offline_time TIMESTAMP;');
+      console.log('Added last_offline_time column to gateway_info');
+    } catch (e: any) {
+      if (e.code !== '42701') console.error('Failed to alter gateway_info table:', e);
     }
     
     // Execute alter table for data_distributions start_time just in case
@@ -75,6 +110,14 @@ const initDb = async () => {
       if (e.code !== '42701') console.error('Failed to alter table:', e);
     }
 
+    // Execute alter table for api_tokens permissions just in case
+    try {
+      await query('ALTER TABLE api_tokens ADD COLUMN permissions VARCHAR[] DEFAULT \'{read_data}\';');
+      console.log('Added permissions column to api_tokens');
+    } catch (e: any) {
+      if (e.code !== '42701') console.error('Failed to alter table:', e);
+    }
+
     // Ensure raw_mqtt_logs has gateway_sncode for joins and filtering
     try {
       await query('ALTER TABLE raw_mqtt_logs ADD COLUMN gateway_sncode VARCHAR(64);');
@@ -86,6 +129,86 @@ const initDb = async () => {
       await query('CREATE INDEX IF NOT EXISTS idx_raw_mqtt_logs_time ON raw_mqtt_logs(received_at DESC);');
     } catch (e) {
       console.error('Failed to create index on raw_mqtt_logs:', e);
+    }
+
+    // Migrate a legacy single-project gateway only when it has no primary
+    // binding yet. The existing project remains its primary project regardless
+    // of whether it is level 1, 2 or 3.
+    try {
+      await query(`
+        CREATE TABLE IF NOT EXISTS gateway_project_bindings (
+          gateway_sncode VARCHAR(64) REFERENCES gateway_info(sncode) ON DELETE CASCADE,
+          project_id INT REFERENCES projects(id) ON DELETE CASCADE,
+          binding_type VARCHAR(16) NOT NULL DEFAULT 'SHARED'
+            CHECK (binding_type IN ('PRIMARY', 'SHARED')),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (gateway_sncode, project_id)
+        )
+      `);
+      await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_project_one_primary
+        ON gateway_project_bindings (gateway_sncode) WHERE binding_type = 'PRIMARY'`);
+      await query(`CREATE INDEX IF NOT EXISTS idx_gateway_project_project
+        ON gateway_project_bindings (project_id, gateway_sncode)`);
+      await query(`
+        INSERT INTO gateway_project_bindings (gateway_sncode, project_id, binding_type)
+        SELECT g.sncode, g.project_id, 'PRIMARY'
+        FROM gateway_info g
+        WHERE g.project_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM gateway_project_bindings existing
+            WHERE existing.gateway_sncode = g.sncode
+              AND existing.binding_type = 'PRIMARY'
+          )
+        ON CONFLICT (gateway_sncode, project_id)
+        DO UPDATE SET binding_type = 'PRIMARY'
+      `);
+      console.log('Gateway multi-project bindings ensured');
+    } catch (e) {
+      console.error('Failed to initialize gateway project bindings:', e);
+    }
+
+    // --- Initialize TimescaleDB Telemetry Hypertable ---
+    try {
+      // 尝试启用 timescaledb 扩展（可能需要超级用户权限，如果已启用或不支持会抛错，此处忽略）
+      try {
+        await query('CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;');
+      } catch (e) {
+        console.warn('Could not create timescaledb extension (might already exist or missing privileges/plugin).', e);
+      }
+
+      await query(`
+        CREATE TABLE IF NOT EXISTS telemetry_data (
+            id BIGSERIAL,
+            gateway_sncode VARCHAR(64) NOT NULL,
+            device_code VARCHAR(64) NOT NULL,
+            point_name VARCHAR(64) NOT NULL,
+            insname VARCHAR(64),
+            propertyno VARCHAR(64),
+            paraname VARCHAR(64),
+            quality INT NOT NULL,
+            value VARCHAR(255) NOT NULL,
+            ts TIMESTAMP NOT NULL,
+            PRIMARY KEY (id, ts)
+        );
+      `);
+
+      // 将表转换为超表（按天分区）
+      try {
+        await query(`SELECT create_hypertable('telemetry_data', 'ts', if_not_exists => TRUE, chunk_time_interval => INTERVAL '1 day');`);
+        console.log('telemetry_data converted to hypertable successfully.');
+      } catch (e: any) {
+        // 如果不支持或已经是超表，则忽略
+        console.warn('Hypertable conversion skipped or failed (might already be hypertable or not supported):', e.message);
+      }
+
+      await query('CREATE INDEX IF NOT EXISTS idx_telemetry_data_ts ON telemetry_data(ts DESC);');
+      await query('CREATE INDEX IF NOT EXISTS idx_telemetry_data_sncode ON telemetry_data(gateway_sncode, ts DESC);');
+      await query('ALTER TABLE telemetry_data ADD COLUMN IF NOT EXISTS project_id INT');
+      await query('ALTER TABLE telemetry_data ADD COLUMN IF NOT EXISTS point_id INT');
+      await query('CREATE INDEX IF NOT EXISTS idx_telemetry_data_project_time ON telemetry_data(project_id, ts DESC);');
+      console.log('telemetry_data table and indexes ensured.');
+    } catch (e) {
+      console.error('Failed to initialize telemetry_data table:', e);
     }
 
     try {
@@ -143,7 +266,9 @@ const initDb = async () => {
     console.error('Failed to initialize database schema:', error);
   }
 };
-initDb();
+void initDb().then(() => initEnvironmentMonitor()).catch((error) => {
+  console.error('Failed to initialize environment monitor:', error);
+});
 
 // Initialize MQTT Subscriber
 initMqtt();
@@ -185,6 +310,9 @@ app.use('/api/users', usersRoutes)
 app.use('/api/distributions', distributionsRoutes)
 app.use('/api/device-types', deviceTypesRoutes)
 app.use('/api/points', pointsRoutes)
+app.use('/api/meter', meterRoutes)
+app.use('/api/electrical', electricalRoutes)
+app.use('/api/environment-monitor', environmentMonitorRoutes)
 
 /**
  * health

@@ -13,13 +13,13 @@ async function check() {
   
   const result2 = await query(`
     SELECT count(*), gateway_sncode, point_name, ts 
-    FROM telemetry_data_2026_03 
+    FROM telemetry_data 
     GROUP BY gateway_sncode, point_name, ts 
     HAVING count(*) > 1 
     ORDER BY ts DESC 
     LIMIT 5;
   `);
-  console.log('Duplicates in telemetry_data_2025_03:', result2.rows);
+  console.log('Duplicates in telemetry_data:', result2.rows);
   
   process.exit(0);
 }

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Edit2, Trash2 } from 'lucide-react';
+import { Plus, Edit2, Trash2, Download, Upload, FileSpreadsheet } from 'lucide-react';
 
 interface Project {
   id: string;
@@ -22,6 +22,12 @@ interface PointItem {
   created_at: string;
 }
 
+const API = (url: string, options?: RequestInit) =>
+  fetch(url, {
+    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}`, ...(options?.headers || {}) },
+    ...options,
+  }).then(r => r.json());
+
 const PointManager: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProject] = useState<string>('');
@@ -31,46 +37,35 @@ const PointManager: React.FC = () => {
   const [pageSize, setPageSize] = useState<number>(10);
   const [total, setTotal] = useState<number>(0);
   const reqIdRef = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [isExportOpen, setIsExportOpen] = useState(false);
   const [editing, setEditing] = useState<PointItem | null>(null);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importProjectId, setImportProjectId] = useState<string>('');
+  const [exportProjectId, setExportProjectId] = useState<string>('');
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<{ success: number; failed: number; errors: string[] } | null>(null);
   const [formData, setFormData] = useState({
-    name: '',
-    insname: '',
-    propertyno: '',
-    device_code: '',
-    gateway_sncode: '',
-    status: 'ACTIVE'
+    name: '', insname: '', propertyno: '', device_code: '', gateway_sncode: '', status: 'ACTIVE'
   });
   const [formProjectId, setFormProjectId] = useState<string>('');
-  const [importProjectId, setImportProjectId] = useState<string>('');
-  const [importText, setImportText] = useState<string>('');
 
   useEffect(() => {
-    fetch('/api/projects', { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } })
-      .then(r => r.json()).then(r => { if (r.success) setProjects(r.data); });
-    // 载入上次选择
+    API('/api/projects').then(r => { if (r.success) setProjects(r.data); });
     const last = localStorage.getItem('pointmgr_selected_project');
     if (last) setSelectedProject(last);
   }, []);
 
-  useEffect(() => {
-    if (selectedProject) loadPoints(selectedProject);
-    else loadPoints(undefined, currentPage, pageSize);
-  }, [selectedProject]);
+  useEffect(() => { loadPoints(selectedProject || undefined); }, [selectedProject]);
 
   useEffect(() => {
-    // 当筛选变化时，从第一页加载
-    const handler = setTimeout(() => {
-      setCurrentPage(1);
-      // 有筛选时进行全局搜索（不限定项目）
-      loadPoints(undefined, 1, pageSize, filterQuery);
-    }, 300);
+    const handler = setTimeout(() => { setCurrentPage(1); loadPoints(selectedProject || undefined, 1, pageSize, filterQuery); }, 300);
     return () => clearTimeout(handler);
   }, [filterQuery]);
 
-  const flattenProjects = (list: Project[], depth = 0): { id: number, name: string, depth: number }[] => {
+  const flattenProjects = (list: Project[], depth = 0): { id: number; name: string; depth: number }[] => {
     let res: any[] = [];
     list.forEach(p => {
       res.push({ id: parseInt(p.id, 10), name: p.name, depth });
@@ -83,24 +78,15 @@ const PointManager: React.FC = () => {
   const loadPoints = (pid?: string, page = currentPage, size = pageSize, q = filterQuery) => {
     const reqId = ++reqIdRef.current;
     const params = new URLSearchParams();
-    // 有筛选词时，忽略项目限定，直接全局搜索
     const hasQ = !!(q && q.trim());
-    if (pid && !hasQ) params.append('project_id', pid);
+    if (pid) params.append('project_id', pid);
     params.append('page', String(page));
     params.append('pageSize', String(size));
     if (hasQ) params.append('q', q.trim());
-    fetch(`/api/points?${params.toString()}`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } })
-      .then(r => r.json()).then(r => {
-        if (reqId !== reqIdRef.current) return; // 忽略过期响应
-        if (r.success) {
-          setPoints(r.data);
-          if (r.pagination) {
-            setTotal(r.pagination.total || 0);
-            setCurrentPage(r.pagination.page || 1);
-            setPageSize(r.pagination.pageSize || size);
-          }
-        }
-      });
+    API(`/api/points?${params.toString()}`).then(r => {
+      if (reqId !== reqIdRef.current) return;
+      if (r.success) { setPoints(r.data); if (r.pagination) { setTotal(r.pagination.total || 0); setCurrentPage(r.pagination.page || 1); } }
+    });
   };
 
   const selectProject = (pid: string) => {
@@ -117,396 +103,219 @@ const PointManager: React.FC = () => {
     const body = { ...formData, project_id: parseInt(formProjectId, 10) };
     const url = editing ? `/api/points/${editing.id}` : '/api/points';
     const method = editing ? 'PUT' : 'POST';
-    const res = await fetch(url, {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.getItem('token')}`
-      },
-      body: JSON.stringify(body)
-    });
-    const result = await res.json();
+    const result = await API(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (result.success) {
-      setIsModalOpen(false);
-      setEditing(null);
+      setIsModalOpen(false); setEditing(null);
       setFormData({ name: '', insname: '', propertyno: '', device_code: '', gateway_sncode: '', status: 'ACTIVE' });
-      // 如果当前页面选择的项目与新增/编辑的项目一致，则刷新；否则切到新增/编辑的项目并刷新
-      if (selectedProject === String(body.project_id)) {
-        loadPoints(selectedProject);
+      if (selectedProject === String(body.project_id)) loadPoints(selectedProject);
+      else { selectProject(String(body.project_id)); }
+    } else { alert(result.error || '保存失败'); }
+  };
+
+  const editPoint = (pt: PointItem) => {
+    setEditing(pt);
+    setFormData({ name: pt.name, insname: pt.insname || '', propertyno: pt.propertyno || '', device_code: pt.device_code || '', gateway_sncode: pt.gateway_sncode || '', status: pt.status });
+    setFormProjectId(String(pt.project_id));
+    setIsModalOpen(true);
+  };
+
+  const deletePoint = async (id: string) => {
+    if (!confirm('确定要删除这个点位吗？')) return;
+    const result = await API(`/api/points/${id}`, { method: 'DELETE' });
+    if (result.success) loadPoints(selectedProject);
+    else alert(result.error || '删除失败');
+  };
+
+  const deleteAll = async () => {
+    if (!selectedProject) return alert('请先选择一个项目');
+    const proj = flatProjects.find(p => p.id === parseInt(selectedProject, 10));
+    if (!confirm(`确定要删除项目「${proj?.name || selectedProject}」下的全部点位吗？此操作不可恢复。`)) return;
+    const result = await API(`/api/points/by-project/${selectedProject}`, { method: 'DELETE' });
+    if (result.success) { alert(`已删除 ${result.data.deleted} 个点位`); loadPoints(selectedProject); }
+    else alert(result.error || '删除失败');
+  };
+
+  // Export Excel - direct download
+  const handleExport = async () => {
+    if (!exportProjectId) return alert('请选择要导出的项目');
+    try {
+      const resp = await fetch(`/api/points/export?project_id=${exportProjectId}`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      if (!resp.ok) { const err = await resp.json(); alert(err.error || '导出失败'); return; }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = '点位列表.xlsx';
+      a.click();
+      URL.revokeObjectURL(url);
+      setIsExportOpen(false);
+      setExportProjectId('');
+    } catch (err) { alert('导出失败'); }
+  };
+
+  // Download template
+  const handleTemplate = async () => {
+    try {
+      const resp = await fetch('/api/points/template', {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      if (!resp.ok) { const err = await resp.json(); alert(err.error || '下载失败'); return; }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = '点位导入模板.xlsx';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) { alert('模板下载失败'); }
+  };
+
+  // Import Excel
+  const handleImport = async () => {
+    if (!importFile) return alert('请选择 Excel 文件');
+    if (!importProjectId) return alert('请选择目标项目');
+    setImporting(true);
+    setImportResult(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', importFile);
+      formData.append('project_id', importProjectId);
+      const resp = await fetch('/api/points/bulk-xlsx', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` },
+        body: formData,
+      });
+      const result = await resp.json();
+      if (result.success) {
+        setImportResult(result.data);
+        setImportFile(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        loadPoints(importProjectId);
       } else {
-        selectProject(String(body.project_id));
+        alert(result.error || '导入失败');
       }
-    } else {
-      alert(result.error);
+    } catch (err) {
+      alert('导入请求失败');
+    } finally {
+      setImporting(false);
     }
   };
 
-  const del = async (id: string) => {
-    if (!confirm('确定删除该点位吗？')) return;
-    const res = await fetch(`/api/points/${id}`, {
-      method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-    });
-    const r = await res.json();
-    if (r.success) loadPoints(selectedProject);
-  };
+  const totalPages = Math.max(Math.ceil(total / pageSize), 1);
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-xl font-semibold text-gray-800">点位管理</h2>
-          <p className="text-sm text-gray-500 mt-1">按项目维护自定义点位名称，采集入库时自动匹配更新 point_name</p>
-        </div>
-        <div className="flex items-center space-x-3">
-          <input
-            value={filterQuery}
-            onChange={(e) => setFilterQuery(e.target.value)}
-            placeholder="筛选：项目编号/项目名称/点位名称/实体编号/属性号"
-            className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none w-96"
-          />
-          <button onClick={() => setIsExportOpen(true)} className="px-3 py-2 border border-gray-300 rounded-lg bg-white hover:bg-gray-50">导出</button>
-          <button
-            onClick={() => {
-              setImportProjectId(selectedProject || '');
-              setImportText('project_code,project_name,name,insname,propertyno,device_code,gateway_sncode,status\n');
-              setIsImportOpen(true);
-            }}
-            className="px-3 py-2 border border-gray-300 rounded-lg bg-white hover:bg-gray-50"
-          >
-            导入
-          </button>
-          <button
-            onClick={() => {
-              setEditing(null);
-              setFormData({ name: '', insname: '', propertyno: '', device_code: '', gateway_sncode: '', status: 'ACTIVE' });
-              setFormProjectId(selectedProject || '');
-              setIsModalOpen(true);
-            }}
-            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center space-x-2 transition-colors shadow-sm"
-          >
-            <Plus className="w-4 h-4" /><span>新增点位</span>
-          </button>
-        </div>
+    <div className="p-6 max-w-full mx-auto space-y-6">
+      {/* Header */}
+      <div className="flex flex-wrap items-center gap-4">
+        <h1 className="text-2xl font-bold text-gray-800">点位管理</h1>
+        <div className="flex-1" />
+        <button onClick={handleTemplate} className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm">
+          <FileSpreadsheet size={16} /> 下载导入模板
+        </button>
+        <button onClick={() => setIsImportOpen(true)} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm">
+          <Upload size={16} /> Excel 导入
+        </button>
+        <button onClick={() => setIsExportOpen(true)} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">
+          <Download size={16} /> Excel 导出
+        </button>
+        <button onClick={() => { setEditing(null); setFormData({ name: '', insname: '', propertyno: '', device_code: '', gateway_sncode: '', status: 'ACTIVE' }); setIsModalOpen(true); }} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">
+          <Plus size={16} /> 新增点位
+        </button>
+        <button onClick={deleteAll} className="px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 text-sm flex items-center gap-2">
+          <Trash2 size={16} /> 删除全部
+        </button>
       </div>
 
-      <div className="bg-white rounded-xl shadow-sm overflow-hidden">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
+      {/* Filter & Project Select */}
+      <div className="flex flex-wrap gap-4 items-center">
+        <select value={selectedProject} onChange={(e) => selectProject(e.target.value)} className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm min-w-[200px]">
+          <option value="">全部项目</option>
+          {flatProjects.map(p => (<option key={p.id} value={p.id}>{'\u00A0'.repeat(p.depth * 2)}{p.name}</option>))}
+        </select>
+        <input value={filterQuery} onChange={e => setFilterQuery(e.target.value)} placeholder="搜索 点位名称 / insname / propertyno ..." className="flex-1 min-w-[250px] px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm" />
+      </div>
+
+      {/* Table */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
+        <table className="w-full text-sm text-left">
+          <thead className="bg-gray-50 border-b border-gray-200 text-gray-600">
             <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">项目编号</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">项目名称</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">点位名称</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">匹配条件</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">状态</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">创建时间</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th>
+              <th className="px-4 py-3 font-medium">点位名称</th>
+              <th className="px-4 py-3 font-medium">insname</th>
+              <th className="px-4 py-3 font-medium">propertyno</th>
+              <th className="px-4 py-3 font-medium">设备地址</th>
+              <th className="px-4 py-3 font-medium">网关SN</th>
+              <th className="px-4 py-3 font-medium">状态</th>
+              <th className="px-4 py-3 font-medium">所属项目</th>
+              <th className="px-4 py-3 font-medium">创建时间</th>
+              <th className="px-4 py-3 font-medium">操作</th>
             </tr>
           </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {points.length === 0 ? (
-              <tr>
-                <td colSpan={7} className="px-6 py-10 text-center text-gray-500">
-                  {filterQuery.trim() ? '未找到匹配点位，请调整筛选条件' : '暂无点位，请点击右上角新增'}
+          <tbody className="divide-y divide-gray-100">
+            {points.map(pt => (
+              <tr key={pt.id} className="hover:bg-gray-50 transition-colors">
+                <td className="px-4 py-3 font-medium text-gray-800">{pt.name}</td>
+                <td className="px-4 py-3 text-gray-500">{pt.insname || '-'}</td>
+                <td className="px-4 py-3 text-gray-500">{pt.propertyno || '-'}</td>
+                <td className="px-4 py-3 text-gray-500">{pt.device_code || '-'}</td>
+                <td className="px-4 py-3 text-gray-500">{pt.gateway_sncode || '-'}</td>
+                <td className="px-4 py-3"><span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${pt.status === 'ACTIVE' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>{pt.status}</span></td>
+                <td className="px-4 py-3 text-gray-500">{pt.project_name || '-'}</td>
+                <td className="px-4 py-3 text-gray-400 text-xs">{new Date(pt.created_at).toLocaleString()}</td>
+                <td className="px-4 py-3">
+                  <div className="flex gap-2">
+                    <button onClick={() => editPoint(pt)} className="p-1.5 rounded hover:bg-blue-50 text-blue-600"><Edit2 size={15} /></button>
+                    <button onClick={() => deletePoint(pt.id)} className="p-1.5 rounded hover:bg-red-50 text-red-500"><Trash2 size={15} /></button>
+                  </div>
                 </td>
               </tr>
-            ) : (
-              points.map(p => (
-                <tr key={p.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 font-mono">{p.project_code || '-'}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{p.project_name || '-'}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{p.name}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                    <span className="font-mono bg-gray-50 border rounded px-2 py-0.5">
-                      insname={p.insname || '*'}; propertyno={p.propertyno || '*'}; dev={p.device_code || '*'}; sn={p.gateway_sncode || '*'}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${p.status === 'ACTIVE' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'}`}>
-                      {p.status}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{new Date(p.created_at).toLocaleString()}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                    <button
-                      onClick={() => {
-                        setEditing(p);
-                        setFormData({
-                          name: p.name,
-                          insname: p.insname || '',
-                          propertyno: p.propertyno || '',
-                          device_code: p.device_code || '',
-                          gateway_sncode: p.gateway_sncode || '',
-                          status: p.status || 'ACTIVE'
-                        });
-                        setFormProjectId(String(p.project_id));
-                        setIsModalOpen(true);
-                      }}
-                      className="text-blue-600 hover:text-blue-900 mr-3 transition-colors"
-                    >
-                      <Edit2 className="w-5 h-5" />
-                    </button>
-                    <button onClick={() => del(p.id)} className="text-red-600 hover:text-red-900 transition-colors">
-                      <Trash2 className="w-5 h-5" />
-                    </button>
-                  </td>
-                </tr>
-              ))
-            )}
+            ))}
+            {points.length === 0 && (<tr><td colSpan={9} className="px-4 py-10 text-center text-gray-400">暂无数据</td></tr>)}
           </tbody>
         </table>
       </div>
 
       {/* Pagination */}
-      <div className="flex items-center justify-between mt-4 bg-white rounded-xl shadow-sm px-4 py-3 border border-gray-200">
-        <div className="text-sm text-gray-600">
-          共 {total} 条，页码 {currentPage} / {Math.max(1, Math.ceil(total / pageSize))}
-        </div>
-        <div className="flex items-center space-x-3">
-          <select
-            value={pageSize}
-            onChange={(e) => {
-              const size = parseInt(e.target.value, 10);
-              setPageSize(size);
-              setCurrentPage(1);
-              loadPoints(selectedProject || undefined, 1, size);
-            }}
-            className="px-2 py-1 border border-gray-300 rounded"
-          >
-            {[10, 20, 50, 100].map(s => <option key={s} value={s}>{s} / 页</option>)}
-          </select>
-          <button
-            onClick={() => {
-              const page = Math.max(1, currentPage - 1);
-              if (page === currentPage) return;
-              loadPoints(selectedProject || undefined, page, pageSize);
-            }}
-            disabled={currentPage === 1}
-            className="px-3 py-1 border border-gray-300 rounded disabled:opacity-50"
-          >
-            上一页
-          </button>
-          <button
-            onClick={() => {
-              const maxPage = Math.max(1, Math.ceil(total / pageSize));
-              const page = Math.min(maxPage, currentPage + 1);
-              if (page === currentPage) return;
-              loadPoints(selectedProject || undefined, page, pageSize);
-            }}
-            disabled={currentPage >= Math.max(1, Math.ceil(total / pageSize))}
-            className="px-3 py-1 border border-gray-300 rounded disabled:opacity-50"
-          >
-            下一页
-          </button>
-          <button
-            onClick={() => loadPoints(selectedProject || undefined, currentPage, pageSize)}
-            className="px-3 py-1 border border-gray-300 rounded"
-          >
-            刷新
-          </button>
-        </div>
-      </div>
-
-      {/* Import Modal */}
-      {isImportOpen && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl">
-            <div className="p-6 border-b border-gray-100 flex justify-between items-center">
-              <h3 className="text-xl font-semibold text-gray-800">批量导入点位</h3>
-              <button onClick={() => setIsImportOpen(false)} className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100">
-                <span className="text-2xl leading-none">&times;</span>
-              </button>
-            </div>
-            <div className="p-6 space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">导入到项目 <span className="text-red-500">*</span></label>
-                  <select
-                    value={importProjectId}
-                    onChange={(e) => setImportProjectId(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
-                  >
-                    <option value="">— 请选择项目 —</option>
-                    {flatProjects.map(p => (
-                      <option key={`imp-${p.id}`} value={p.id}>{'\u00A0'.repeat(p.depth * 2)}{p.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="text-sm text-gray-500 self-end">
-                  支持 CSV 文本（第一行标题）：project_code,project_name,name,insname,propertyno,device_code,gateway_sncode,status。<br />
-                  重复导入时以【项目+insname】作为主键进行更新；此处必须选择项目。
-                </div>
-              </div>
-              <textarea
-                value={importText}
-                onChange={(e) => setImportText(e.target.value)}
-                className="w-full h-56 px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm"
-                placeholder="在此粘贴 CSV 文本或手动输入"
-              />
-              <div className="flex justify-end space-x-3">
-                <button onClick={() => setIsImportOpen(false)} className="px-4 py-2 border border-gray-300 rounded-lg bg-white hover:bg-gray-50">取消</button>
-                <button
-                  onClick={async () => {
-                    const lines = importText.split(/\r?\n/).filter(l => l.trim().length > 0);
-                    if (lines.length <= 1) return alert('请粘贴包含表头与数据的 CSV 文本');
-                    const header = lines[0].split(',').map(h => h.trim());
-                    const idx = (k: string) => header.indexOf(k);
-                    const rows = lines.slice(1).map(l => {
-                      const cols = l.split(','); // 简易解析：请避免字段内包含逗号
-                      return {
-                        project_code: cols[idx('project_code')] || '',
-                        project_name: cols[idx('project_name')] || '',
-                        name: cols[idx('name')] || '',
-                        insname: cols[idx('insname')] || '',
-                        propertyno: cols[idx('propertyno')] || '',
-                        device_code: cols[idx('device_code')] || '',
-                        gateway_sncode: cols[idx('gateway_sncode')] || '',
-                        status: cols[idx('status')] || 'ACTIVE',
-                      };
-                    }).filter(r => r.name);
-                    if (rows.length === 0) return alert('未解析到有效数据行');
-                    if (!importProjectId) return alert('请先选择导入到的项目');
-                    const res = await fetch('/api/points/bulk', {
-                      method: 'POST',
-                      headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${localStorage.getItem('token')}`
-                      },
-                      body: JSON.stringify({
-                        project_id: parseInt(importProjectId, 10),
-                        rows
-                      })
-                    });
-                    const r = await res.json();
-                    if (r.success) {
-                      alert(`导入完成：成功 ${r.data.success} 条，失败 ${r.data.failed} 条`);
-                      setIsImportOpen(false);
-                      // 刷新列表
-                      loadPoints(selectedProject || undefined, currentPage, pageSize, filterQuery);
-                    } else {
-                      alert(r.error || '导入失败');
-                    }
-                  }}
-                  className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white"
-                >
-                  开始导入
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-      {isExportOpen && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
-            <div className="p-6 border-b border-gray-100 flex justify-between items-center">
-              <h3 className="text-xl font-semibold text-gray-800">按项目导出点位</h3>
-              <button onClick={() => setIsExportOpen(false)} className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100">
-                <span className="text-2xl leading-none">&times;</span>
-              </button>
-            </div>
-            <div className="p-6 space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">选择项目 <span className="text-red-500">*</span></label>
-                <select
-                  value={selectedProject}
-                  onChange={(e) => selectProject(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
-                >
-                  <option value="">— 请选择项目 —</option>
-                  {flatProjects.map(p => (
-                    <option key={`exp-${p.id}`} value={p.id}>{'\u00A0'.repeat(p.depth * 2)}{p.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex justify-end space-x-3">
-                <button onClick={() => setIsExportOpen(false)} className="px-4 py-2 border border-gray-300 rounded-lg bg-white hover:bg-gray-50">取消</button>
-                <button
-                  onClick={async () => {
-                    if (!selectedProject) return alert('请选择要导出的项目');
-                    const params = new URLSearchParams();
-                    params.append('project_id', selectedProject);
-                    const res = await fetch(`/api/points/export?${params.toString()}`, {
-                      headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-                    });
-                    if (!res.ok) {
-                      const r = await res.json().catch(() => ({}));
-                      return alert(r.error || '导出失败');
-                    }
-                    const blob = await res.blob();
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = 'points.csv';
-                    document.body.appendChild(a);
-                    a.click();
-                    a.remove();
-                    URL.revokeObjectURL(url);
-                    setIsExportOpen(false);
-                  }}
-                  className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white"
-                >
-                  导出
-                </button>
-              </div>
-            </div>
+      {totalPages > 1 && (
+        <div className="flex justify-between items-center text-sm text-gray-600">
+          <div>共 {total} 条</div>
+          <div className="flex gap-2">
+            <button onClick={() => loadPoints(selectedProject, currentPage - 1)} disabled={currentPage <= 1} className="px-3 py-1 border rounded hover:bg-gray-50 disabled:opacity-40">上一页</button>
+            <span className="px-3 py-1">{currentPage} / {totalPages}</span>
+            <button onClick={() => loadPoints(selectedProject, currentPage + 1)} disabled={currentPage >= totalPages} className="px-3 py-1 border rounded hover:bg-gray-50 disabled:opacity-40">下一页</button>
           </div>
         </div>
       )}
 
+      {/* Add / Edit Modal */}
       {isModalOpen && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl">
             <div className="p-6 border-b border-gray-100 flex justify-between items-center">
               <h3 className="text-xl font-semibold text-gray-800">{editing ? '编辑点位' : '新增点位'}</h3>
-              <button onClick={() => setIsModalOpen(false)} className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100">
-                <span className="text-2xl leading-none">&times;</span>
-              </button>
+              <button onClick={() => setIsModalOpen(false)} className="text-gray-400 hover:text-gray-600 p-1 rounded hover:bg-gray-100"><span className="text-2xl leading-none">&times;</span></button>
             </div>
             <form onSubmit={submit} className="p-6 space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">选择项目 <span className="text-red-500">*</span></label>
-                <select
-                  value={formProjectId}
-                  onChange={(e) => setFormProjectId(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
-                  required
-                >
+                <select value={formProjectId} onChange={(e) => setFormProjectId(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" required>
                   <option value="">— 请选择项目 —</option>
-                  {flatProjects.map(p => (
-                    <option key={`modal-${p.id}`} value={p.id}>{'\u00A0'.repeat(p.depth * 2)}{p.name}</option>
-                  ))}
+                  {flatProjects.map(p => (<option key={`modal-${p.id}`} value={p.id}>{'\u00A0'.repeat(p.depth * 2)}{p.name}</option>))}
                 </select>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">点位名称 <span className="text-red-500">*</span></label>
-                <input
-                  value={formData.name}
-                  onChange={e => setFormData({ ...formData, name: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
-                  placeholder="例如：进水温度、出水压力"
-                  required
-                />
+                <input value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" placeholder="例如：进水温度、出水压力" required />
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">insname</label>
-                  <input value={formData.insname} onChange={e => setFormData({ ...formData, insname: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">propertyno</label>
-                  <input value={formData.propertyno} onChange={e => setFormData({ ...formData, propertyno: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
-                </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div><label className="block text-sm font-medium text-gray-700 mb-1">insname</label><input value={formData.insname} onChange={e => setFormData({ ...formData, insname: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" /></div>
+                <div><label className="block text-sm font-medium text-gray-700 mb-1">propertyno</label><input value={formData.propertyno} onChange={e => setFormData({ ...formData, propertyno: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" /></div>
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">设备编码 device_code</label>
-                  <input value={formData.device_code} onChange={e => setFormData({ ...formData, device_code: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">网关 SN</label>
-                  <input value={formData.gateway_sncode} onChange={e => setFormData({ ...formData, gateway_sncode: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
-                </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div><label className="block text-sm font-medium text-gray-700 mb-1">设备地址 device_code</label><input value={formData.device_code} onChange={e => setFormData({ ...formData, device_code: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" /></div>
+                <div><label className="block text-sm font-medium text-gray-700 mb-1">网关 SN</label><input value={formData.gateway_sncode} onChange={e => setFormData({ ...formData, gateway_sncode: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" /></div>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">状态</label>
@@ -520,6 +329,71 @@ const PointManager: React.FC = () => {
                 <button type="submit" className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">保存</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Export Modal */}
+      {isExportOpen && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+            <h3 className="text-xl font-semibold text-gray-800 mb-4">导出点位</h3>
+            <label className="block text-sm font-medium text-gray-700 mb-1">选择要导出的项目</label>
+            <select value={exportProjectId} onChange={(e) => setExportProjectId(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none mb-4">
+              <option value="">— 请选择项目 —</option>
+              {flatProjects.map(p => (<option key={`exp-${p.id}`} value={p.id}>{'\u00A0'.repeat(p.depth * 2)}{p.name}</option>))}
+            </select>
+            <div className="flex justify-end space-x-3">
+              <button onClick={() => { setIsExportOpen(false); setExportProjectId(''); }} className="px-6 py-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">取消</button>
+              <button onClick={handleExport} disabled={!exportProjectId} className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-40">下载 Excel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Import Modal */}
+      {isImportOpen && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg p-6">
+            <h3 className="text-xl font-semibold text-gray-800 mb-4">Excel 批量导入点位</h3>
+
+            <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
+              <p className="font-medium mb-1">导入说明：</p>
+              <ul className="list-disc pl-4 space-y-0.5 text-xs">
+                <li>请先<button onClick={handleTemplate} className="text-blue-600 underline mx-1">下载导入模板</button>，按模板格式填写</li>
+                <li>表头字段必须与模板一致（中文），点位名称为必填</li>
+                <li>如 insname 已存在，将更新该条记录；否则新增</li>
+                <li>单次最大文件 10MB</li>
+              </ul>
+            </div>
+
+            <label className="block text-sm font-medium text-gray-700 mb-1">选择目标项目 <span className="text-red-500">*</span></label>
+            <select value={importProjectId} onChange={(e) => setImportProjectId(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none mb-4">
+              <option value="">— 请选择项目 —</option>
+              {flatProjects.map(p => (<option key={`imp-${p.id}`} value={p.id}>{'\u00A0'.repeat(p.depth * 2)}{p.name}</option>))}
+            </select>
+
+            <label className="block text-sm font-medium text-gray-700 mb-1">上传 Excel 文件 <span className="text-red-500">*</span></label>
+            <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={(e) => setImportFile(e.target.files?.[0] || null)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none mb-4 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:bg-blue-50 file:text-blue-700 file:text-sm hover:file:bg-blue-100" />
+
+            {importResult && (
+              <div className={`mb-4 p-3 rounded-lg text-sm ${importResult.failed > 0 ? 'bg-orange-50 border border-orange-200 text-orange-800' : 'bg-green-50 border border-green-200 text-green-800'}`}>
+                <p className="font-medium">导入完成：成功 {importResult.success} 条{importResult.failed > 0 ? `，失败 ${importResult.failed} 条` : ''}</p>
+                {importResult.errors?.length > 0 && (
+                  <ul className="mt-2 list-disc pl-4 text-xs space-y-0.5 max-h-32 overflow-y-auto">
+                    {importResult.errors.map((err, i) => <li key={i}>{err}</li>)}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            <div className="flex justify-end space-x-3">
+              <button onClick={() => { setIsImportOpen(false); setImportFile(null); setImportResult(null); setImportProjectId(''); if (fileInputRef.current) fileInputRef.current.value = ''; }} className="px-6 py-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-50">取消</button>
+              <button onClick={handleImport} disabled={!importFile || !importProjectId || importing} className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40">
+                {importing ? '导入中...' : '开始导入'}
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -23,7 +23,7 @@ interface LogMessage {
 
 const MqttDebugModal: React.FC<MqttDebugModalProps> = ({ gateway, onClose }) => {
   const [logs, setLogs] = useState<LogMessage[]>([]);
-  const [command, setCommand] = useState('{"method": "get_status"}');
+  const [command, setCommand] = useState('{\n  "datas": [\n    {\n      "insno": "",\n      "propertyno": "",\n      "value": ""\n    }\n  ]\n}');
   const [isConnected, setIsConnected] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -33,12 +33,22 @@ const MqttDebugModal: React.FC<MqttDebugModalProps> = ({ gateway, onClose }) => 
 
   const addLog = (type: LogMessage['type'], content: any) => {
     const textContent = typeof content === 'string' ? content : JSON.stringify(content);
-    setLogs(prev => [...prev, {
-      id: Date.now() + Math.random(),
-      time: new Date().toLocaleTimeString(),
-      type,
-      content: textContent
-    }].slice(-50)); // Keep last 50 logs
+    setLogs(prev => {
+      // Prevent exact duplicate logs within a short timeframe (e.g. 2 seconds)
+      const isDuplicate = prev.some(log => 
+        log.content === textContent && 
+        log.type === type &&
+        Date.now() - Number(log.id) < 2000
+      );
+      if (isDuplicate) return prev;
+
+      return [...prev, {
+        id: Date.now() + Math.random(),
+        time: new Date().toLocaleTimeString(),
+        type,
+        content: textContent
+      }].slice(-100);
+    }); // Keep last 100 logs
   };
 
   useEffect(() => {
@@ -77,10 +87,29 @@ const MqttDebugModal: React.FC<MqttDebugModalProps> = ({ gateway, onClose }) => 
         } else if (data.type === 'auth_success') {
           addLog('info', 'Authentication successful. Waiting for gateway data...');
         } else if (data.type === 'mqtt_message') {
-          // Filter logs for this specific gateway using its SN code or its specific subscribe_topic
-          const payloadStr = JSON.stringify(data.payload);
-          const isMatch = (gateway.subscribe_topic && data.topic === gateway.subscribe_topic) || 
-                          payloadStr.includes(gateway.sncode);
+          // Filter logs for this specific gateway
+          const payloadStr = typeof data.payload === 'string' ? data.payload : JSON.stringify(data.payload);
+          
+          let isMatch = false;
+          // Condition 1: Exact topic match (if subscribe_topic is configured)
+          if (gateway.subscribe_topic && data.topic === gateway.subscribe_topic) {
+            isMatch = true;
+          } 
+          // Condition 2: Payload contains the SN code
+          else if (payloadStr.includes(gateway.sncode)) {
+            isMatch = true;
+          }
+          // Condition 3: Match ACK topic related to the gateway's publish_topic
+          // E.g., if publish_topic is "device/control", ACK might be "device/control/ack" or "device/ack"
+          // Here we check if the incoming topic contains "ack" AND is somehow related to this gateway
+          else if (gateway.publish_topic && data.topic.includes('ack') && 
+                  (data.topic.includes(gateway.publish_topic) || gateway.publish_topic.includes(data.topic.replace('/ack', '')))) {
+            isMatch = true;
+          }
+          // Fallback Condition: It is a command response ("results" array) and contains "success"
+          else if (payloadStr.includes('"results"') && payloadStr.includes('"success"')) {
+            isMatch = true;
+          }
                           
           if (isMatch) {
             addLog('receive', `[上报 | ${data.topic}] ${payloadStr}`);
@@ -228,8 +257,8 @@ const MqttDebugModal: React.FC<MqttDebugModalProps> = ({ gateway, onClose }) => 
               <textarea
                 value={command}
                 onChange={(e) => setCommand(e.target.value)}
-                placeholder='例如: {"command": "open_valve", "id": 1}'
-                className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all font-mono text-sm resize-none h-20"
+                placeholder='输入 JSON 格式下发指令'
+                className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all font-mono text-sm resize-none h-32"
                 disabled={!gateway.publish_topic}
               />
               <button

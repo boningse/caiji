@@ -1,13 +1,15 @@
 CREATE TABLE IF NOT EXISTS projects (
     id SERIAL PRIMARY KEY,
     parent_id INT REFERENCES projects(id) ON DELETE CASCADE,
-    code VARCHAR(64),
+    code VARCHAR(64) NOT NULL CONSTRAINT projects_code_not_blank CHECK (BTRIM(code) <> ''),
     name VARCHAR(128) NOT NULL,
     details TEXT,
     level INT NOT NULL CHECK (level >= 1 AND level <= 3),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_code_unique
+ON projects (LOWER(BTRIM(code)));
 
 CREATE TABLE IF NOT EXISTS gateway_info (
     sncode VARCHAR(64) PRIMARY KEY,
@@ -22,9 +24,25 @@ CREATE TABLE IF NOT EXISTS gateway_info (
     subscribe_topic VARCHAR(255),
     status VARCHAR(16) DEFAULT 'OFFLINE',
     last_online_time TIMESTAMP,
+    last_offline_time TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 网关与项目的多对多关系：一个任意层级主项目，可关联同一项目树内的其他项目。
+CREATE TABLE IF NOT EXISTS gateway_project_bindings (
+    gateway_sncode VARCHAR(64) REFERENCES gateway_info(sncode) ON DELETE CASCADE,
+    project_id INT REFERENCES projects(id) ON DELETE CASCADE,
+    binding_type VARCHAR(16) NOT NULL DEFAULT 'SHARED'
+        CHECK (binding_type IN ('PRIMARY', 'SHARED')),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (gateway_sncode, project_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_project_one_primary
+ON gateway_project_bindings (gateway_sncode)
+WHERE binding_type = 'PRIMARY';
+CREATE INDEX IF NOT EXISTS idx_gateway_project_project
+ON gateway_project_bindings (project_id, gateway_sncode);
 
 CREATE TABLE IF NOT EXISTS devices (
     id SERIAL PRIMARY KEY,
@@ -68,6 +86,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     name VARCHAR(128) NOT NULL,
     token VARCHAR(64) UNIQUE NOT NULL,
     project_ids INT[] NOT NULL DEFAULT '{}',
+    permissions VARCHAR[] DEFAULT '{read_data}',
     status VARCHAR(32) DEFAULT 'ACTIVE',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

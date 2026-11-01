@@ -8,9 +8,13 @@ interface Gateway {
   ip_address: string;
   project_id: number | null;
   project_name?: string;
+  project_ids?: number[];
+  associated_project_ids?: number[];
+  associated_projects?: Array<{ id: number; name: string; level: number }>;
   publish_topic?: string;
   subscribe_topic?: string;
   status: string;
+  last_offline_time?: string | null;
   created_at: string;
 }
 
@@ -22,6 +26,10 @@ interface Project {
   level: number;
   children: Project[];
 }
+
+const formatDateTime = (value?: string | null) => value
+  ? new Date(value).toLocaleString('zh-CN', { hour12: false })
+  : '-';
 
 const DeviceConfig: React.FC = () => {
   const [gateways, setGateways] = useState<Gateway[]>([]);
@@ -40,6 +48,7 @@ const DeviceConfig: React.FC = () => {
     alias: '',
     ip_address: '',
     project_id: '',
+    associated_project_ids: [] as string[],
     publish_topic: '',
     subscribe_topic: ''
   });
@@ -89,8 +98,8 @@ const DeviceConfig: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.sncode || !formData.alias) {
-      alert('SN号和网关别名不能为空！');
+    if (!formData.sncode || !formData.alias || !formData.project_id) {
+      alert('SN号、网关别名和主项目不能为空！');
       return;
     }
     
@@ -110,7 +119,7 @@ const DeviceConfig: React.FC = () => {
       const result = await response.json();
       if (result.success) {
         setIsModalOpen(false);
-        setFormData({ sncode: '', alias: '', ip_address: '', project_id: '', publish_topic: '', subscribe_topic: '' });
+        setFormData({ sncode: '', alias: '', ip_address: '', project_id: '', associated_project_ids: [], publish_topic: '', subscribe_topic: '' });
         setIsEditMode(false);
         fetchGateways(); // Refresh the list
       } else {
@@ -130,6 +139,7 @@ const DeviceConfig: React.FC = () => {
       alias: gw.alias,
       ip_address: gw.ip_address || '',
       project_id: gw.project_id ? gw.project_id.toString() : '',
+      associated_project_ids: (gw.associated_project_ids || []).map(String),
       publish_topic: gw.publish_topic || '',
       subscribe_topic: gw.subscribe_topic || ''
     });
@@ -138,7 +148,7 @@ const DeviceConfig: React.FC = () => {
   };
 
   const handleAddClick = () => {
-    setFormData({ sncode: '', alias: '', ip_address: '', project_id: '', publish_topic: '', subscribe_topic: '' });
+    setFormData({ sncode: '', alias: '', ip_address: '', project_id: '', associated_project_ids: [], publish_topic: '', subscribe_topic: '' });
     setIsEditMode(false);
     setIsModalOpen(true);
   };
@@ -154,7 +164,7 @@ const DeviceConfig: React.FC = () => {
 
   // 递归获取某个项目及其所有子项目的 ID 集合
   const getProjectAndChildrenIds = (projectId: string, projectList: Project[]): string[] => {
-    let ids: string[] = [];
+    const ids: string[] = [];
     const findNode = (list: Project[]) => {
       for (const p of list) {
         if (p.id === projectId) {
@@ -177,10 +187,10 @@ const DeviceConfig: React.FC = () => {
   };
 
   // 将树状项目结构拍平，用于添加/编辑弹窗的下拉框选择
-  const flattenProjects = (list: Project[], depth = 0): {id: string, name: string, depth: number}[] => {
-    let result: {id: string, name: string, depth: number}[] = [];
+  const flattenProjects = (list: Project[], depth = 0): {id: string, name: string, depth: number, level: number}[] => {
+    let result: {id: string, name: string, depth: number, level: number}[] = [];
     list.forEach(p => {
-      result.push({ id: p.id, name: p.name, depth });
+      result.push({ id: p.id, name: p.name, depth, level: p.level });
       if (p.children && p.children.length > 0) {
         result = result.concat(flattenProjects(p.children, depth + 1));
       }
@@ -188,26 +198,60 @@ const DeviceConfig: React.FC = () => {
     return result;
   };
   const flatProjects = flattenProjects(projects);
+  const selectedRootProject = formData.project_id
+    ? projects.find(project => getProjectAndChildrenIds(project.id, projects).includes(formData.project_id))
+    : undefined;
+  const selectedProjectTreeIds = selectedRootProject
+    ? new Set(getProjectAndChildrenIds(selectedRootProject.id, projects))
+    : new Set<string>();
+  const availableAssociatedProjects = flatProjects.filter(project =>
+    project.id !== formData.project_id &&
+    (project.level === 2 || project.level === 3) &&
+    selectedProjectTreeIds.has(project.id)
+  );
+
+  const toggleAssociatedProject = (projectId: string) => {
+    setFormData(prev => ({
+      ...prev,
+      associated_project_ids: prev.associated_project_ids.includes(projectId)
+        ? prev.associated_project_ids.filter(id => id !== projectId)
+        : [...prev.associated_project_ids, projectId],
+    }));
+  };
+
+  // 项目被删除后，旧网关可能暂时没有项目。过滤时统一清理空值，
+  // 避免 [null] 导致页面报错并让整组筛选失效。
+  const getGatewayProjectIds = (gateway: Gateway): string[] => {
+    const ids = Array.isArray(gateway.project_ids) ? gateway.project_ids : [];
+    const validIds = ids
+      .filter((id): id is number => id !== null && id !== undefined && Number.isFinite(Number(id)))
+      .map(String);
+    if (validIds.length === 0 && gateway.project_id !== null && gateway.project_id !== undefined) {
+      return [String(gateway.project_id)];
+    }
+    return validIds;
+  };
 
   // 根据当前选择的分级项目、SN号和别名进行过滤
   const filteredGateways = gateways.filter(gw => {
+    const gatewayProjectIds = getGatewayProjectIds(gw);
     // 1. 项目分级过滤
     let matchProject = true;
     if (filterLevel3 !== '全部') {
       const allowedIds = getProjectAndChildrenIds(filterLevel3, projects);
-      matchProject = gw.project_id !== null && allowedIds.includes(gw.project_id.toString());
+      matchProject = gatewayProjectIds.some(id => allowedIds.includes(id));
     } else if (filterLevel2 !== '全部') {
       const allowedIds = getProjectAndChildrenIds(filterLevel2, projects);
-      matchProject = gw.project_id !== null && allowedIds.includes(gw.project_id.toString());
+      matchProject = gatewayProjectIds.some(id => allowedIds.includes(id));
     } else if (filterLevel1 !== '全部') {
       const allowedIds = getProjectAndChildrenIds(filterLevel1, projects);
-      matchProject = gw.project_id !== null && allowedIds.includes(gw.project_id.toString());
+      matchProject = gatewayProjectIds.some(id => allowedIds.includes(id));
     }
     
     // 2. 搜索词过滤 (支持SN号和别名)
     const matchSearch = searchQuery === '' || 
       gw.sncode.toLowerCase().includes(searchQuery.toLowerCase()) || 
-      gw.alias.toLowerCase().includes(searchQuery.toLowerCase());
+      String(gw.alias || '').toLowerCase().includes(searchQuery.toLowerCase());
       
     return matchProject && matchSearch;
   });
@@ -218,15 +262,15 @@ const DeviceConfig: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col lg:flex-row lg:justify-between lg:items-start gap-4">
         <h2 className="text-xl font-semibold text-gray-800">网关列表</h2>
-        <div className="flex space-x-4">
+        <div className="flex flex-col sm:flex-row gap-2 sm:gap-4 flex-wrap">
           <input 
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="搜索 SN号 / 网关别名"
-            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none w-64 transition-all"
+            className="flex-1 sm:flex-none sm:w-64 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition-all"
           />
           <select 
             value={filterLevel1}
@@ -235,7 +279,7 @@ const DeviceConfig: React.FC = () => {
               setFilterLevel2('全部');
               setFilterLevel3('全部');
             }}
-            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white text-gray-700"
+            className="flex-1 sm:flex-none px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white text-gray-700"
           >
             <option value="全部">一级项目(全部)</option>
             {level1Projects.map(p => (
@@ -249,7 +293,7 @@ const DeviceConfig: React.FC = () => {
               setFilterLevel3('全部');
             }}
             disabled={filterLevel1 === '全部'}
-            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white text-gray-700 disabled:bg-gray-100 disabled:text-gray-400"
+            className="flex-1 sm:flex-none px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white text-gray-700 disabled:bg-gray-100 disabled:text-gray-400"
           >
             <option value="全部">二级项目(全部)</option>
             {level2Projects.map(p => (
@@ -260,7 +304,7 @@ const DeviceConfig: React.FC = () => {
             value={filterLevel3}
             onChange={(e) => setFilterLevel3(e.target.value)}
             disabled={filterLevel2 === '全部'}
-            className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white text-gray-700 disabled:bg-gray-100 disabled:text-gray-400"
+            className="flex-1 sm:flex-none px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-white text-gray-700 disabled:bg-gray-100 disabled:text-gray-400"
           >
             <option value="全部">三级项目(全部)</option>
             {level3Projects.map(p => (
@@ -269,7 +313,7 @@ const DeviceConfig: React.FC = () => {
           </select>
           <button 
             onClick={handleAddClick}
-            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center space-x-2"
+            className="flex-1 sm:flex-none bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center justify-center space-x-2"
           >
             <Plus className="w-4 h-4" />
             <span>添加网关</span>
@@ -278,179 +322,162 @@ const DeviceConfig: React.FC = () => {
       </div>
 
       <div className="bg-white rounded-xl shadow-sm overflow-hidden">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">SN号</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">网关别名</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">所属项目</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">IP地址</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">发布主题</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">状态</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {paginatedGateways.length === 0 ? (
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
               <tr>
-                <td colSpan={6} className="px-6 py-4 text-center text-gray-500">
-                  暂无网关数据
-                </td>
+                <th className="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">SN号</th>
+                <th className="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">网关别名</th>
+                <th className="hidden sm:table-cell px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">主项目 / 关联项目</th>
+                <th className="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">状态</th>
+                <th className="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">离线时间</th>
+                <th className="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th>
               </tr>
-            ) : (
-              paginatedGateways.map((gw) => (
-                <tr key={gw.sncode} className="hover:bg-gray-50">
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{gw.sncode}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{gw.alias}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                    {gw.project_name ? (
-                      <span className="px-2 py-1 bg-blue-50 text-blue-600 rounded-md text-xs">{gw.project_name}</span>
-                    ) : (
-                      <span className="text-gray-400 text-xs">-</span>
-                    )}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{gw.ip_address}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                    {gw.publish_topic ? (
-                      <span className="font-mono text-xs bg-gray-100 px-2 py-1 rounded">{gw.publish_topic}</span>
-                    ) : (
-                      <span className="text-gray-400 text-xs">-</span>
-                    )}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm">
-                    <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                      gw.status === 'ONLINE' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
-                    }`}>
-                      {gw.status}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 flex items-center space-x-3">
-                    <button 
-                      onClick={() => setDebugGateway(gw)}
-                      className="text-green-600 hover:text-green-900"
-                      title="MQTT通信调试"
-                    >
-                      <Activity className="w-4 h-4" />
-                    </button>
-                    <button 
-                      onClick={() => handleEditClick(gw)}
-                      className="text-blue-600 hover:text-blue-900"
-                      title="编辑"
-                    >
-                      <Edit2 className="w-4 h-4" />
-                    </button>
-                    <button 
-                      onClick={async () => {
-                        if (confirm(`确定要删除网关 ${gw.sncode} 吗？`)) {
-                          try {
-                            const res = await fetch(`/api/gateways/${gw.sncode}`, { method: 'DELETE' });
-                            const result = await res.json();
-                            if (result.success) {
-                              fetchGateways();
-                            } else {
-                              alert('删除失败');
-                            }
-                          } catch (e) {
-                            alert('删除出错');
-                          }
-                        }
-                      }}
-                      className="text-red-600 hover:text-red-900"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {paginatedGateways.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-4 lg:px-6 py-4 text-center text-gray-500">
+                    暂无网关数据
                   </td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ) : (
+                paginatedGateways.map((gw) => (
+                  <tr key={gw.sncode} className="hover:bg-gray-50">
+                    <td className="px-4 lg:px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{gw.sncode}</td>
+                    <td className="px-4 lg:px-6 py-4 whitespace-nowrap text-sm text-gray-500">{gw.alias}</td>
+                    <td className="hidden sm:table-cell px-4 lg:px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {gw.project_name ? (
+                        <div className="flex flex-wrap gap-1 max-w-xs">
+                          <span className="px-2 py-1 bg-blue-50 text-blue-600 rounded-md text-xs">主：{gw.project_name}</span>
+                          {(gw.associated_projects || []).map(project => (
+                            <span key={project.id} className="px-2 py-1 bg-emerald-50 text-emerald-700 rounded-md text-xs">
+                              {project.level}级：{project.name}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-gray-400 text-xs">-</span>
+                      )}
+                    </td>
+                    <td className="px-4 lg:px-6 py-4 whitespace-nowrap text-sm">
+                      <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
+                        gw.status === 'ONLINE' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
+                      }`}>
+                        {gw.status}
+                      </span>
+                    </td>
+                    <td className="px-4 lg:px-6 py-4 whitespace-nowrap text-xs text-gray-500">
+                      {gw.status === 'OFFLINE' ? formatDateTime(gw.last_offline_time) : '-'}
+                    </td>
+                    <td className="px-4 lg:px-6 py-4 whitespace-nowrap text-sm text-gray-500 flex items-center space-x-2">
+                      <button 
+                        onClick={() => setDebugGateway(gw)}
+                        className="text-green-600 hover:text-green-900 p-1"
+                        title="MQTT通信调试"
+                      >
+                        <Activity className="w-4 h-4" />
+                      </button>
+                      <button 
+                        onClick={() => handleEditClick(gw)}
+                        className="text-blue-600 hover:text-blue-900 p-1"
+                        title="编辑"
+                      >
+                        <Edit2 className="w-4 h-4" />
+                      </button>
+                      <button 
+                        onClick={async () => {
+                          if (confirm(`确定要删除网关 ${gw.sncode} 吗？`)) {
+                            try {
+                              const res = await fetch(`/api/gateways/${gw.sncode}`, { method: 'DELETE' });
+                              const result = await res.json();
+                              if (result.success) {
+                                fetchGateways();
+                              } else {
+                                alert('删除失败');
+                              }
+                            } catch {
+                              alert('删除出错');
+                            }
+                          }
+                        }}
+                        className="text-red-600 hover:text-red-900 p-1"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
 
         {/* Pagination Controls */}
-        <div className="px-6 py-4 flex items-center justify-between border-t border-gray-200 bg-white">
-          <div className="flex-1 flex justify-between sm:hidden">
+        <div className="px-4 lg:px-6 py-4 flex flex-col sm:flex-row items-center justify-between gap-4 border-t border-gray-200 bg-white">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 w-full sm:w-auto">
+            <p className="text-sm text-gray-700">
+              显示第 <span className="font-medium">{filteredGateways.length === 0 ? 0 : (currentPage - 1) * pageSize + 1}</span> 到 <span className="font-medium">{Math.min(currentPage * pageSize, filteredGateways.length)}</span> 条结果，共 <span className="font-medium">{filteredGateways.length}</span> 条
+            </p>
+            <div className="flex items-center space-x-2">
+              <span className="text-sm text-gray-700">每页显示</span>
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  setPageSize(Number(e.target.value));
+                  setCurrentPage(1);
+                }}
+                className="border-gray-300 rounded-md text-sm focus:ring-blue-500 focus:border-blue-500 p-1.5 outline-none border"
+              >
+                <option value={5}>5</option>
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+              </select>
+              <span className="text-sm text-gray-700">条</span>
+            </div>
+          </div>
+          <div className="flex items-center space-x-2 sm:space-x-4 w-full sm:w-auto justify-end">
             <button
               onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
               disabled={currentPage === 1}
-              className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="relative inline-flex items-center px-3 py-2 rounded-l-lg border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
             >
+              <ChevronLeft className="h-4 w-4 mr-1" aria-hidden="true" />
               上一页
             </button>
+            <span className="relative inline-flex items-center px-4 py-2 border-y border-gray-300 bg-white text-sm font-medium text-gray-700">
+              {currentPage} / {totalPages}
+            </span>
             <button
               onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
               disabled={currentPage === totalPages}
-              className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="relative inline-flex items-center px-3 py-2 rounded-r-lg border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               下一页
+              <ChevronRight className="h-4 w-4 ml-1" aria-hidden="true" />
             </button>
-          </div>
-          <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
-            <div>
-              <p className="text-sm text-gray-700">
-                显示第 <span className="font-medium">{filteredGateways.length === 0 ? 0 : (currentPage - 1) * pageSize + 1}</span> 到 <span className="font-medium">{Math.min(currentPage * pageSize, filteredGateways.length)}</span> 条结果，共 <span className="font-medium">{filteredGateways.length}</span> 条
-              </p>
-            </div>
-            <div className="flex items-center space-x-4">
-              <div className="flex items-center space-x-2">
-                <span className="text-sm text-gray-700">每页显示</span>
-                <select
-                  value={pageSize}
-                  onChange={(e) => {
-                    setPageSize(Number(e.target.value));
-                    setCurrentPage(1);
-                  }}
-                  className="border-gray-300 rounded-md text-sm focus:ring-blue-500 focus:border-blue-500 p-1 outline-none border"
-                >
-                  <option value={5}>5</option>
-                  <option value={10}>10</option>
-                  <option value={20}>20</option>
-                  <option value={50}>50</option>
-                </select>
-                <span className="text-sm text-gray-700">条</span>
-              </div>
-              <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
-                <button
-                  onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
-                  disabled={currentPage === 1}
-                  className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <span className="sr-only">上一页</span>
-                  <ChevronLeft className="h-5 w-5" aria-hidden="true" />
-                </button>
-                <span className="relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700">
-                  {currentPage} / {totalPages}
-                </span>
-                <button
-                  onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
-                  disabled={currentPage === totalPages}
-                  className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <span className="sr-only">下一页</span>
-                  <ChevronRight className="h-5 w-5" aria-hidden="true" />
-                </button>
-              </nav>
-            </div>
           </div>
         </div>
       </div>
 
       {/* Add Gateway Modal */}
       {isModalOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl shadow-lg w-full max-w-md">
-            <div className="flex justify-between items-center p-6 border-b border-gray-100">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-lg w-full max-w-xl max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center p-4 lg:p-6 border-b border-gray-100">
               <h3 className="text-lg font-semibold text-gray-800">
                 {isEditMode ? '编辑网关' : '添加新网关'}
               </h3>
               <button 
                 onClick={() => setIsModalOpen(false)}
-                className="text-gray-400 hover:text-gray-600"
+                className="text-gray-400 hover:text-gray-600 p-1.5 rounded-full"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
             
-            <form onSubmit={handleSubmit} className="p-6 space-y-4">
+            <form onSubmit={handleSubmit} className="p-4 lg:p-6 space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   网关SN号 <span className="text-red-500">*</span>
@@ -462,7 +489,7 @@ const DeviceConfig: React.FC = () => {
                   onChange={handleInputChange}
                   disabled={isEditMode}
                   placeholder="例如: 1312690CC87717F4"
-                  className={`w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all ${
+                  className={`w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all ${
                     isEditMode ? 'bg-gray-100 cursor-not-allowed' : ''
                   }`}
                   required
@@ -479,7 +506,7 @@ const DeviceConfig: React.FC = () => {
                   value={formData.alias}
                   onChange={handleInputChange}
                   placeholder="例如: 一号车间主网关"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
                   required
                 />
               </div>
@@ -494,7 +521,7 @@ const DeviceConfig: React.FC = () => {
                   value={formData.publish_topic}
                   onChange={handleInputChange}
                   placeholder="例如: device/control/1312690CC87717F4"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all font-mono text-sm"
+                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all font-mono text-sm"
                 />
               </div>
 
@@ -508,29 +535,54 @@ const DeviceConfig: React.FC = () => {
                   value={formData.subscribe_topic}
                   onChange={handleInputChange}
                   placeholder="例如: device/data/1312690CC87717F4"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all font-mono text-sm"
+                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all font-mono text-sm"
                 />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  主项目 <span className="text-red-500">*</span>
+                </label>
+                <select
+                  name="project_id"
+                  value={formData.project_id}
+                  onChange={(e) => setFormData(prev => ({ ...prev, project_id: e.target.value, associated_project_ids: [] }))}
+                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all bg-white"
+                >
+                  <option value="">请选择主项目</option>
+                  {flatProjects.map(project => (
+                    <option key={project.id} value={project.id}>
+                      {'—'.repeat(project.depth)}{project.level}级 · {project.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-gray-500">一级、二级、三级项目均可作为网关的独立主项目。</p>
               </div>
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   关联项目
                 </label>
-                <select
-                  name="project_id"
-                  value={formData.project_id}
-                  onChange={(e) => setFormData(prev => ({ ...prev, project_id: e.target.value }))}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all bg-white"
-                >
-                  <option value="">未绑定项目</option>
-                  {flatProjects.map(project => (
-                    <option key={project.id} value={project.id}>
-                      {'　'.repeat(project.depth)}
-                      {project.depth > 0 ? '├─ ' : ''}
-                      {project.name}
-                    </option>
+                <div className="max-h-44 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-2">
+                  {!formData.project_id ? (
+                    <p className="text-xs text-gray-500">请先选择主项目</p>
+                  ) : availableAssociatedProjects.length === 0 ? (
+                    <p className="text-xs text-gray-500">同一项目树下暂无其他二级或三级项目</p>
+                  ) : availableAssociatedProjects.map(project => (
+                    <label key={project.id} className="flex items-center gap-2 rounded-md bg-white px-3 py-2 border border-gray-100 cursor-pointer hover:border-blue-300">
+                      <input
+                        type="checkbox"
+                        checked={formData.associated_project_ids.includes(project.id)}
+                        onChange={() => toggleAssociatedProject(project.id)}
+                        className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span className="text-sm text-gray-700">
+                        {'　'.repeat(Math.max(project.depth - 1, 0))}{project.level}级 · {project.name}
+                      </span>
+                    </label>
                   ))}
-                </select>
+                </div>
+                <p className="mt-1 text-xs text-gray-500">可选择同一项目树下的其他二/三级项目；数据会完整复制给主项目和每个关联项目。</p>
               </div>
 
               <div>
@@ -543,22 +595,22 @@ const DeviceConfig: React.FC = () => {
                   value={formData.ip_address}
                   onChange={handleInputChange}
                   placeholder="例如: 192.168.1.100"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+                  className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
                 />
               </div>
 
-              <div className="pt-4 flex justify-end space-x-3">
+              <div className="pt-4 flex flex-col-reverse sm:flex-row gap-2 sm:justify-end sm:space-x-3">
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                  className="w-full sm:w-auto px-4 py-2.5 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
                 >
                   取消
                 </button>
                 <button
                   type="submit"
                   disabled={loading}
-                  className={`px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center ${
+                  className={`w-full sm:w-auto px-4 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center justify-center ${
                     loading ? 'opacity-70 cursor-not-allowed' : ''
                   }`}
                 >

@@ -11,6 +11,8 @@ import DataDistribution from "./pages/DataDistribution";
 import DeviceTypeConfig from "./pages/DeviceTypeConfig";
 import PointManager from "./pages/PointManager";
 import Login from "./pages/Login";
+import DataReception from "./pages/DataReception";
+import EnvironmentMonitor from "./pages/EnvironmentMonitor";
 
 const PrivateRoute = ({ children }: { children: React.ReactNode }) => {
   const token = localStorage.getItem('token');
@@ -34,6 +36,10 @@ export default function App() {
                   <Route path="/devices" element={<DeviceConfig />} />
                   <Route path="/projects" element={<ProjectManagement />} />
                   <Route path="/realtime" element={<RealtimeData />} />
+                  <Route path="/meter-reception" element={<DataReception />} />
+                  <Route path="/environment-monitor" element={<Navigate to="/environment-monitor/data" replace />} />
+                  <Route path="/environment-monitor/config" element={<EnvironmentMonitor view="config" />} />
+                  <Route path="/environment-monitor/data" element={<EnvironmentMonitor view="data" />} />
                   <Route path="/api-config" element={<ApiConfig />} />
                   <Route path="/data-distribution" element={<DataDistribution />} />
                   <Route path="/points" element={<PointManager />} />

@@ -2,6 +2,7 @@ import { Pool as PgPool, PoolConfig as PgPoolConfig } from 'pg';
 import format from 'pg-format';
 import mysql from 'mysql2/promise';
 import { query as localQuery } from './db.js';
+import { getGatewayProjectIds } from './gateway-projects.js';
 
 interface Distribution {
   id: number;
@@ -25,9 +26,9 @@ function getPgPool(distId: number, config: any): PgPool {
     user: config.user,
     password: config.password,
     database: config.database,
-    max: 10,
+    max: 50, // 提升外部 DB 分发连接池大小以应对高吞吐
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 5000,
+    connectionTimeoutMillis: 10000,
   };
   
   const pool = new PgPool(poolConfig);
@@ -51,7 +52,7 @@ function getMysqlPool(distId: number, config: any): mysql.Pool {
     password: config.password,
     database: config.database,
     waitForConnections: true,
-    connectionLimit: 10,
+    connectionLimit: 50, // 提升 MySQL 连接池限制
     queueLimit: 0
   });
   
@@ -59,21 +60,31 @@ function getMysqlPool(distId: number, config: any): mysql.Pool {
   return pool;
 }
 
-export async function distributeData(gatewaySncode: string, records: any[], ts: Date) {
+export async function distributeData(gatewaySncode: string, records: any[], ts: Date, projectIdOverride?: number) {
   if (!records || records.length === 0) return;
-  
+
   try {
-    // 1. 获取网关所属的 project_id
-    const gwResult = await localQuery('SELECT project_id FROM gateway_info WHERE sncode = $1', [gatewaySncode]);
-    if (gwResult.rowCount === 0 || !gwResult.rows[0].project_id) {
-      return;
+    // 4G 直传设备仍使用点位项目；网关数据则完整复制到全部绑定项目。
+    const projectIds = projectIdOverride
+      ? [projectIdOverride]
+      : await getGatewayProjectIds(gatewaySncode);
+    for (const projectId of Array.from(new Set(projectIds))) {
+      await distributeProjectData(projectId, records, ts);
     }
-    const projectId = gwResult.rows[0].project_id;
-    
+  } catch (error) {
+    console.error('Error in distributeData:', error);
+  }
+}
+
+async function distributeProjectData(projectId: number, records: any[], ts: Date, distributionId?: number) {
+  try {
     // 2. 找到所有匹配该项目的活动的分发配置
     const distResult = await localQuery(
-      "SELECT id, project_ids, target_db_type, target_db_config, start_time FROM data_distributions WHERE $1 = ANY(project_ids) AND status = 'ACTIVE'",
-      [projectId]
+      `SELECT id, project_ids, target_db_type, target_db_config, start_time
+       FROM data_distributions
+       WHERE $1 = ANY(project_ids) AND status = 'ACTIVE'
+         AND ($2::int IS NULL OR id = $2)`,
+      [projectId, distributionId || null]
     );
     
     if (distResult.rowCount === 0) return;
@@ -82,47 +93,54 @@ export async function distributeData(gatewaySncode: string, records: any[], ts: 
     const projResult = await localQuery('SELECT code FROM projects WHERE id = $1', [projectId]);
     const projectCode = projResult.rowCount && projResult.rows[0].code ? projResult.rows[0].code : `proj_${projectId}`;
     
-    // 生成年月后缀
+    // 恢复为按年月生成目标分发库表名
     const dateObj = new Date(ts);
     const yearMonth = `${dateObj.getFullYear()}${String(dateObj.getMonth() + 1).padStart(2, '0')}`;
     const tableName = `${yearMonth}_recorddata_${projectCode}`;
 
-    // 格式化分发数据结构
-    const distData = records.map(r => [
+    // 严格过滤：只保留真正有效的数值
+    const validRecords = records.filter(r => {
+      if (r.value === null || r.value === undefined) return false;
+      const strValue = String(r.value).trim();
+      if (strValue === '' || strValue === 'null' || strValue === 'undefined' || strValue === 'NaN') return false;
+      const numValue = parseFloat(strValue);
+      return !isNaN(numValue) && isFinite(numValue);
+    });
+    const distData = validRecords.map(r => [
       r.insname || '',
       r.propertyno ? parseInt(r.propertyno, 10) || 0 : 0, // propertyno 对应 funcid
       formatDate(ts),
-      r.value !== null && r.value !== undefined ? parseFloat(r.value) : null,
+      parseFloat(String(r.value).trim()),
       1 // virtual 默认1
     ]);
     
+    // 如果没有有效数据，直接返回
+    if (validRecords.length === 0) return;
+    
     // 3. 执行分发
     for (const dist of distResult.rows as Distribution[]) {
-      // 检查是否在分发时间范围内（如果有设置 start_time 的话）
-      if (dist.start_time) {
-        const startTime = new Date(dist.start_time);
-        if (ts < startTime) {
-          // 当前数据的时间早于该分发进程的启动时间，跳过分发
-          continue;
-        }
-      }
       if (dist.target_db_type === 'postgresql') {
         try {
           const pool = getPgPool(dist.id, dist.target_db_config);
-          
-          // 确保目标表存在
+
+          // 确保目标表存在及主键约束，用于支持 upsert
+          // 取消为第三方库建 timescaledb 扩展，因表名带月份后缀，不需要超表
           await pool.query(`
             CREATE TABLE IF NOT EXISTS "${tableName}" (
               "sign" VARCHAR(64),
               "funcid" INT,
-              "receivetime" VARCHAR(64),
+              "receivetime" TIMESTAMP,
               "data" NUMERIC,
-              "virtual" INT
+              "virtual" SMALLINT,
+              PRIMARY KEY ("sign", "funcid", "receivetime")
             );
           `);
           
-          // 批量插入
-          const insertQuery = format(`INSERT INTO "${tableName}" (sign, funcid, receivetime, data, virtual) VALUES %L`, distData);
+          // 批量插入 (UPSERT)，存在则更新，避免报错或重复
+          const insertQuery = format(
+            `INSERT INTO "${tableName}" (sign, funcid, receivetime, data, virtual) VALUES %L ON CONFLICT (sign, funcid, receivetime) DO UPDATE SET data = EXCLUDED.data, virtual = EXCLUDED.virtual`, 
+            distData
+          );
           await pool.query(insertQuery);
           
         } catch (e: any) {
@@ -132,20 +150,25 @@ export async function distributeData(gatewaySncode: string, records: any[], ts: 
         try {
           const pool = getMysqlPool(dist.id, dist.target_db_config);
           
-          // 确保目标表存在 (MySQL 语法)
+          // 确保目标表存在及主键约束 (MySQL 语法)
           await pool.query(`
             CREATE TABLE IF NOT EXISTS \`${tableName}\` (
               \`sign\` VARCHAR(64),
               \`funcid\` INT,
-              \`receivetime\` VARCHAR(64),
+              \`receivetime\` DATETIME,
               \`data\` DOUBLE,
-              \`virtual\` INT
+              \`virtual\` TINYINT,
+              PRIMARY KEY (\`sign\`, \`funcid\`, \`receivetime\`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
           `);
           
-          // 批量插入 (MySQL)
+          // 批量插入 (MySQL UPSERT: INSERT ... ON DUPLICATE KEY UPDATE)
           if (distData.length > 0) {
-            await pool.query(`INSERT INTO \`${tableName}\` (sign, funcid, receivetime, data, virtual) VALUES ?`, [distData]);
+            await pool.query(
+              `INSERT INTO \`${tableName}\` (sign, funcid, receivetime, data, virtual) VALUES ? 
+               ON DUPLICATE KEY UPDATE data = VALUES(data), virtual = VALUES(virtual)`, 
+              [distData]
+            );
           }
           
         } catch (e: any) {
@@ -158,12 +181,12 @@ export async function distributeData(gatewaySncode: string, records: any[], ts: 
           const method = config.method || 'POST';
           const headers = config.headers || {};
           
-          // 将数据格式化为 JSON 发送
-          const payload = records.map(r => ({
+          // 将数据格式化为 JSON 发送（只发送有效记录）
+          const payload = validRecords.map(r => ({
             sign: r.insname || '',
             funcid: r.propertyno ? parseInt(r.propertyno, 10) || 0 : 0,
             receivetime: formatDate(ts),
-            data: r.value !== null && r.value !== undefined ? parseFloat(r.value) : null,
+            data: parseFloat(r.value),
             virtual: 1
           }));
 
@@ -181,11 +204,17 @@ export async function distributeData(gatewaySncode: string, records: any[], ts: 
       }
     }
   } catch (error) {
-    console.error('Error in distributeData:', error);
+    console.error(`Error distributing project ${projectId}:`, error);
   }
 }
 
-export async function distributeDataForDist(distId: number, gatewaySncode: string, records: any[], ts: Date) {
+export async function distributeDataForDist(
+  distId: number,
+  gatewaySncode: string,
+  records: any[],
+  ts: Date,
+  projectIdOverride?: number
+) {
   if (!records || records.length === 0) return;
   try {
     const distRes = await localQuery(
@@ -199,65 +228,12 @@ export async function distributeDataForDist(distId: number, gatewaySncode: strin
       const startTime = new Date(dist.start_time);
       if (ts < startTime) return;
     }
-    // 获取网关所属项目及项目码
-    const gwResult = await localQuery('SELECT project_id FROM gateway_info WHERE sncode = $1', [gatewaySncode]);
-    const projectId = gwResult.rows?.[0]?.project_id;
-    const projResult = await localQuery('SELECT code FROM projects WHERE id = $1', [projectId]);
-    const projectCode = projResult.rowCount && projResult.rows[0].code ? projResult.rows[0].code : `proj_${projectId}`;
-    const dateObj = new Date(ts);
-    const yearMonth = `${dateObj.getFullYear()}${String(dateObj.getMonth() + 1).padStart(2, '0')}`;
-    const tableName = `${yearMonth}_recorddata_${projectCode}`;
-    const distData = records.map(r => [
-      r.insname || '',
-      r.propertyno ? parseInt(r.propertyno, 10) || 0 : 0,
-      formatDate(ts),
-      r.value !== null && r.value !== undefined ? parseFloat(r.value) : null,
-      1
-    ]);
-    if (dist.target_db_type === 'postgresql') {
-      const pool = getPgPool(dist.id, dist.target_db_config);
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS "${tableName}" (
-          "sign" VARCHAR(64),
-          "funcid" INT,
-          "receivetime" VARCHAR(64),
-          "data" NUMERIC,
-          "virtual" INT
-        );
-      `);
-      const insertQuery = format(`INSERT INTO "${tableName}" (sign, funcid, receivetime, data, virtual) VALUES %L`, distData);
-      await pool.query(insertQuery);
-    } else if (dist.target_db_type === 'mysql') {
-      const pool = getMysqlPool(dist.id, dist.target_db_config);
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS \`${tableName}\` (
-          \`sign\` VARCHAR(64),
-          \`funcid\` INT,
-          \`receivetime\` VARCHAR(64),
-          \`data\` DOUBLE,
-          \`virtual\` INT
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
-      `);
-      if (distData.length > 0) {
-        await pool.query(`INSERT INTO \`${tableName}\` (sign, funcid, receivetime, data, virtual) VALUES ?`, [distData]);
-      }
-    } else if (dist.target_db_type === 'api') {
-      const config = dist.target_db_config;
-      const url = config.url;
-      const method = config.method || 'POST';
-      const headers = config.headers || {};
-      const payload = records.map(r => ({
-        sign: r.insname || '',
-        funcid: r.propertyno ? parseInt(r.propertyno, 10) || 0 : 0,
-        receivetime: formatDate(ts),
-        data: r.value !== null && r.value !== undefined ? parseFloat(r.value) : null,
-        virtual: 1
-      }));
-      fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json', ...headers },
-        body: JSON.stringify(payload)
-      }).catch(err => console.error(`API Distribution ${dist.id} failed:`, err));
+    const boundProjectIds = projectIdOverride
+      ? [projectIdOverride]
+      : await getGatewayProjectIds(gatewaySncode);
+    const distributionProjectIds = new Set((dist.project_ids || []).map(Number));
+    for (const projectId of boundProjectIds.filter((id) => distributionProjectIds.has(id))) {
+      await distributeProjectData(projectId, records, ts, distId);
     }
   } catch (e) {
     console.error('distributeDataForDist error:', e);
@@ -273,5 +249,5 @@ function formatDate(date: Date): string {
   const hh = beijingTime.getUTCHours().toString().padStart(2, '0');
   const mm = beijingTime.getUTCMinutes().toString().padStart(2, '0');
   const ss = beijingTime.getUTCSeconds().toString().padStart(2, '0');
-  return `${d}/${m}/${y} ${hh}:${mm}:${ss}`;
+  return `${y}-${m}-${d} ${hh}:${mm}:${ss}`;
 }

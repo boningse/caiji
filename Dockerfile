@@ -42,6 +42,8 @@ EXPOSE 3000
 ENV TZ=Asia/Shanghai
 ENV NODE_ENV=production
 ENV PORT=3000
+# 增加 Node.js 老生代内存上限至 4GB，以应对大量并发数据解析与缓存
+ENV NODE_OPTIONS="--max-old-space-size=4096"
 
 # Start the server
 CMD ["tsx", "api/server.ts"]
